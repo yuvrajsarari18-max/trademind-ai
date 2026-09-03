@@ -1,82 +1,72 @@
-// ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 //  TradeMind AI — LLM Client
-//  Model-independent. Swap model in .env anytime.
-// ─────────────────────────────────────────────
-import { GoogleGenerativeAI } from "@google/generative-ai";
+//  NVIDIA NIM API (OpenAI-compatible)
+//  Model: nvidia/llama-3.1-nemotron-70b-instruct (most powerful)
+// ─────────────────────────────────────────────────────────────
+import OpenAI from "openai";
 import "dotenv/config";
 
-const MODEL = process.env.LLM_MODEL || "gemini-2.0-flash";
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1";
+const MODEL = process.env.NVIDIA_MODEL || "nvidia/llama-3.1-nemotron-70b-instruct";
 
-// ── Tool schema format ────────────────────────
-function buildGeminiFunctions(tools) {
-  return tools.map((t) => ({
-    name: t.name,
-    description: t.description,
-    parameters: t.parameters,
-  }));
+// NVIDIA NIM client (OpenAI-compatible)
+const client = new OpenAI({
+  apiKey: process.env.NVIDIA_API_KEY,
+  baseURL: NVIDIA_BASE_URL,
+});
+
+// ─────────────────────────────────────────────
+//  Simple reasoning call (no tools)
+// ─────────────────────────────────────────────
+export async function think(systemPrompt, userMessage) {
+  const response = await client.chat.completions.create({
+    model: MODEL,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ],
+    temperature: 0.3,
+    max_tokens: 2048,
+  });
+  return response.choices[0].message.content;
 }
 
-// ── Main client class ─────────────────────────
-export class LLMClient {
-  constructor(model = MODEL) {
-    this.model = model;
-    this.geminiModel = genAI.getGenerativeModel({
-      model: this.model,
-      generationConfig: { temperature: 0.3 },
-    });
-    console.log(`[LLMClient] Model: ${this.model}`);
+// ─────────────────────────────────────────────
+//  Full chat call with tool support
+// ─────────────────────────────────────────────
+export async function chat(messages, tools = []) {
+  const params = {
+    model: MODEL,
+    messages,
+    temperature: 0.3,
+    max_tokens: 4096,
+  };
+
+  if (tools.length > 0) {
+    params.tools = tools.map((t) => ({ type: "function", function: t }));
+    params.tool_choice = "auto";
   }
 
-  // Single reasoning call
-  async think(systemPrompt, userMessage) {
-    const prompt = `${systemPrompt}\n\nUser: ${userMessage}`;
-    const result = await this.geminiModel.generateContent(prompt);
-    return result.response.text();
-  }
+  const response = await client.chat.completions.create(params);
+  const msg = response.choices[0].message;
 
-  // Chat with tool calling
-  async chat(messages, tools = []) {
-    const geminiTools =
-      tools.length > 0
-        ? [{ functionDeclarations: buildGeminiFunctions(tools) }]
-        : [];
-
-    const chat = this.geminiModel.startChat({
-      tools: geminiTools,
-      history: messages.slice(0, -1).map((m) => ({
-        role: m.role === "assistant" ? "model" : m.role,
-        parts: [{ text: m.content }],
-      })),
-    });
-
-    const lastMsg = messages[messages.length - 1];
-    const result = await chat.sendMessage(lastMsg.content);
-    const response = result.response;
-
-    // Tool call check
-    const fnCall = response.functionCalls?.();
-    if (fnCall && fnCall.length > 0) {
-      return {
-        isToolCall: true,
-        toolName: fnCall[0].name,
-        toolArgs: fnCall[0].args,
-        content: "",
-      };
-    }
-
+  // Tool call requested by model
+  if (msg.tool_calls && msg.tool_calls.length > 0) {
+    const call = msg.tool_calls[0];
     return {
-      isToolCall: false,
-      content: response.text(),
-      toolName: null,
-      toolArgs: null,
+      isToolCall: true,
+      toolName: call.function.name,
+      toolArgs: JSON.parse(call.function.arguments),
+      content: "",
     };
   }
+
+  return {
+    isToolCall: false,
+    content: msg.content || "",
+    toolName: null,
+    toolArgs: null,
+  };
 }
 
-// Singleton
-let _client = null;
-export function getLLM() {
-  if (!_client) _client = new LLMClient();
-  return _client;
-}
+export const modelName = MODEL;
